@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CB-1 Emulator — Brother KH-970</title>
+<style>
+  body { background:#222; color:#ddd; font-family:monospace; margin:0; display:flex; }
+  #panel { padding:16px; }
+  #lcdwrap { background:#2f3; border:4px solid #111; border-radius:4px; display:inline-block; }
+  canvas { display:block; image-rendering:pixelated; }
+  h1 { font-size:15px; margin:0 0 8px; }
+  .row { margin:6px 0; }
+  button.key { width:44px; height:34px; margin:2px; font-size:14px; }
+  button.ser { width:180px; height:30px; margin:3px; }
+  .status { padding:6px; border-radius:3px; background:#333; min-height:1em; }
+  .on { color:#0f0; } .off { color:#f66; }
+  #logs { background:#111; color:#8f8; font-size:11px; padding:6px; height:180px; overflow:auto; white-space:pre; }
+  table { border-collapse:collapse; }
+  td { padding:0; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>CB-1 (Brother KH-970) emulator</h1>
+  <div id="lcdwrap"><canvas id="lcd" width="244" height="64"></canvas></div>
+
+  <div class="row">
+    <!-- PLACEHOLDER: serial interfaces (CSI=machine, UART=floppy) — not wired up yet -->
+    <button class="ser" id="btnCsi">WebSerial #1: machine (CSI)</button>
+    <button class="ser" id="btnUart">WebSerial #2: floppy (UART)</button>
+    <button class="ser" id="btnDiag">Boot Diagnostic Menu</button>
+  </div>
+  <div class="row status" id="status">backend: disconnected</div>
+
+  <div class="row" id="keys">
+    <table>
+      <tr><td><button class="key">ADVICE</button></td><td><button class="key">DC</button></td><td><button class="key">M/B</button></td><td><button class="key">OK</button></td></tr>
+      <tr><td><button class="key">UP</button></td><td><button class="key">DOWN</button></td><td><button class="key">LEFT</button></td><td><button class="key">RIGHT</button></td></tr>
+      <tr><td><button class="key">1</button></td><td><button class="key">2</button></td><td><button class="key">3</button></td><td><button class="key">C</button></td></tr>
+      <tr><td><button class="key">4</button></td><td><button class="key">5</button></td><td><button class="key">6</button></td><td><button class="key">.</button></td></tr>
+      <tr><td><button class="key">7</button></td><td><button class="key">8</button></td><td><button class="key">9</button></td><td><button class="key">0</button></td></tr>
+    </table>
+  </div>
+
+  <div class="row" id="logs"></div>
+</div>
+
+<script>
+// ============================================================ LCD canvas
+const lcd = document.getElementById('lcd');
+const ctx = lcd.getContext('2d');
+const W = 122, H = 32;                 // SED1520 x2 : 122 cols x 32 rows (4 pages)
+let fb = new Uint8Array(W * H);        // 0/1 framebuffer
+const img = ctx.createImageData(W, H); // reused ImageData (alpha pre-set)
+for (let i = 0; i < W * H; i++) img.data[i * 4 + 3] = 255;
+
+function drawLCD() {
+  for (let i = 0; i < W * H; i++) {
+    const v = fb[i] ? 255 : 0;
+    img.data[i * 4] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v;
+  }
+  // draw at native 122x64 then scale up with nearest-neighbour
+  const small = document.createElement('canvas');
+  small.width = W; small.height = H;
+  small.getContext('2d').putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(small, 0, 0, W, H, 0, 0, lcd.width, lcd.height);
+}
+
+// demo test pattern until the backend sends its first frame
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) fb[y * W + x] = (x ^ y) & 1;
+drawLCD();
+
+// ============================================================ backend link (HTTP polling)
+const status = document.getElementById('status');
+let connected = false;
+
+function setStatus(t, on) {
+  status.textContent = t;
+  status.className = 'row status ' + (on ? 'on' : 'off');
+}
+
+async function pollFrame() {
+  try {
+    const r = await fetch('/frame');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const m = await r.json();
+    const bin = atob(m.pixels);
+    for (let i = 0; i < W * H; i++) fb[i] = bin.charCodeAt(i);
+    drawLCD();
+    if (!connected) { connected = true; setStatus('backend: connected', true); }
+  } catch (e) {
+    if (connected) { connected = false; setStatus('backend: disconnected', false); }
+  }
+}
+setInterval(pollFrame, 50);
+pollFrame();
+
+// ============================================================ keypad
+const keys = document.querySelectorAll('#keys button.key');
+for (const k of keys) {
+  k.addEventListener('pointerdown', () => pressKey(k.textContent, true));
+  k.addEventListener('pointerup',   () => pressKey(k.textContent, false));
+  k.addEventListener('pointerleave',() => pressKey(k.textContent, false));
+}
+async function pressKey(name, down) {
+  const url = '/key?k=' + encodeURIComponent(name) + (down ? '' : '&up=1');
+  try { await fetch(url, { method: 'POST' }); } catch (e) { log('key: ' + e); }
+}
+
+// ============================================================ boot options
+const btnDiag = document.getElementById('btnDiag');
+btnDiag.onclick = () => {
+  fetch('/diag', { method: 'POST' })
+    .then(() => log('boot diagnostic menu requested'))
+    .catch(e => log('diag: ' + e));
+};
+
+// ============================================================ serial — PLACEHOLDER
+// Serial connectivity is not wired up yet. CSI = KH-970 machine link,
+// UART = FB-100 floppy drive. These buttons are placeholders; WebSerial and the
+// RP2040/Arduino bridge will be added after the LCD/keypad interface is stable.
+const btnCsi = document.getElementById('btnCsi');
+const btnUart = document.getElementById('btnUart');
+btnCsi.onclick = () => log('placeholder: machine (CSI) serial not implemented yet');
+btnUart.onclick = () => log('placeholder: floppy (UART) serial not implemented yet');
+
+function log(s) {
+  const l = document.getElementById('logs');
+  l.textContent = s + '\n' + l.textContent;
+  if (l.textContent.length > 2000) l.textContent = l.textContent.slice(0, 2000);
+}
+</script>
+</body>
+</html>
