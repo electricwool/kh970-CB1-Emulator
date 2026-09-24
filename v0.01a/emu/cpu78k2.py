@@ -26,8 +26,14 @@ class CPU78K2:
         self.psw = 0
         self.halted = False
         self.cycles = 0
+        self.history = []          # recent (pc, opcode) ring buffer for crash dump
         # 78K/II fetches the RESET vector from 0x0000 (little-endian)
         self.pc = self.rw(0x0000) if self.bus is not None else 0
+
+    def _hist(self, pc, op):
+        self.history.append((pc, op))
+        if len(self.history) > 4000:
+            self.history = self.history[-2000:]
 
     # ---- registers -----------------------------------------------------
     @property
@@ -159,6 +165,7 @@ class CPU78K2:
             return 0
         self.cycles += 2
         op = self._i8()
+        self._hist((self.pc - 1) & 0xFFFF, op)
         ext = False
         if op == 0x01:                      # '&' external-data prefix
             ext = True
@@ -399,10 +406,12 @@ class CPU78K2:
             self.ww(a, self._i16())
             return 3
         if op == 0x0B:                                      # MOVW sfrp/SP,#imm
-            a = 0xFF00 + self._i8()
-            self.ww(a, self._i16())
-            if a == 0xFF1C:
-                self.sp = self.rw(a)
+            idx = self._i8()
+            imm = self._i16()
+            if idx == 0xFC:                                 # SP (special SFR index)
+                self.sp = imm
+            else:
+                self.ww(0xFF00 + idx, imm)
             return 3
         if op == 0x1C:                                      # MOVW AX,saddrp
             self.ax = self.rw(self._saddr(self._i8()))
@@ -411,13 +420,14 @@ class CPU78K2:
             self.ww(self._saddr(self._i8()), self.ax)
             return 2
         if (op & 0xFD) == 0x11:                             # MOVW AX,sfrp / sfrp,AX / SP
-            a = 0xFF00 + self._i8()
-            if a == 0xFF1C:
+            idx = self._i8()
+            if idx == 0xFC:                                 # SP (special SFR index)
                 if not (op & 2):
                     self.ax = self.sp
                 else:
                     self.sp = self.ax
             else:
+                a = 0xFF00 + idx
                 if not (op & 2):
                     self.ax = self.rw(a)
                 else:
@@ -593,7 +603,33 @@ class CPU78K2:
 
     # ================= helpers =================
     def _bad(self, op, ext):
+        self._dump_crash(op, ext)
         raise NotImplementedError('opcode 0x%02X at 0x%04X (ext=%s)' % (op, (self.pc - 1) & 0xFFFF, ext))
+
+    def _dump_crash(self, op, ext):
+        """Write a full-state crash dump for post-mortem debugging."""
+        try:
+            pc = (self.pc - 1) & 0xFFFF
+            lines = []
+            lines.append('CRASH opcode 0x%02X at 0x%04X ext=%s' % (op, pc, ext))
+            lines.append('PSW=%02X  SP=%04X  RBN=%d  CY=%d  Z=%d  AC=%d  IE=%d' % (
+                self.psw, self.sp, self.rbn, self.cy,
+                (self.psw >> 6) & 1, (self.psw >> 4) & 1, (self.psw >> 7) & 1))
+            for bank in range(4):
+                self.rbn = bank
+                regs = ['%s=%02X' % (REG[i], self.reg(i)) for i in range(8)]
+                self.rbn = (self.psw >> 2) & 3
+                lines.append('bank%d: %s' % (bank, ' '.join(regs)))
+            # stack dump (top 64 bytes)
+            stk = [self.rb((self.sp + i) & 0xFFFF) for i in range(64)]
+            lines.append('stack @%04X: %s' % (self.sp, ' '.join('%02X' % b for b in stk)))
+            lines.append('last 400 instructions (pc, op):')
+            for hpc, hop in self.history[-400:]:
+                lines.append('  %04X %02X' % (hpc, hop))
+            with open('crash_dump.txt', 'w') as f:
+                f.write('\n'.join(lines) + '\n')
+        except Exception:
+            pass
 
     def _mem_ind(self, k):
         # k: 0 [DE+] 1 [HL+] 2 [DE-] 3 [HL-] 4 [DE] 5 [HL]

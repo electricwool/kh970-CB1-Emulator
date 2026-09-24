@@ -28,6 +28,7 @@
     <!-- PLACEHOLDER: serial interfaces (CSI=machine, UART=floppy) — not wired up yet -->
     <button class="ser" id="btnCsi">WebSerial #1: machine (CSI)</button>
     <button class="ser" id="btnUart">WebSerial #2: floppy (UART)</button>
+    <button class="ser" id="btnReset">Reset (keep SRAM)</button>
     <button class="ser" id="btnDiag">Boot Diagnostic Menu</button>
   </div>
   <div class="row status" id="status">backend: disconnected</div>
@@ -114,6 +115,13 @@ btnDiag.onclick = () => {
   fetch('/diag', { method: 'POST' })
     .then(() => log('boot diagnostic menu requested'))
     .catch(e => log('diag: ' + e));
+};
+
+const btnReset = document.getElementById('btnReset');
+btnReset.onclick = () => {
+  fetch('/reset', { method: 'POST' })
+    .then(() => log('reset requested (SRAM preserved)'))
+    .catch(e => log('reset: ' + e));
 };
 
 // ============================================================ serial — PLACEHOLDER
