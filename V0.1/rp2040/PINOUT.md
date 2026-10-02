@@ -51,10 +51,6 @@ CSV `Channel 0`):
 | CLK | — | leave unconnected | — |
 | GND (pin 10) | bare | ground | **Pico GND** |
 
-Only SCK, CS, DIN and DOUT carry signals; black/brown/ch8 and the CLK pin
-stay disconnected.  `GPIO 6` is not part of the harness — it powers the
-level-converter VCCA rail (3.3 V, held high).
-
 ### Power
 
 The machine is powered by 3.3V for the logic from the pico's regulator and 5V from the USB for the solenoids 
