@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CB-1 Emulator — Brother KH-970</title>
+<style>
+  body { background:#222; color:#ddd; font-family:monospace; margin:0; display:flex; }
+  #panel { padding:16px; }
+  #lcdwrap { background:#2f3; border:4px solid #111; border-radius:4px; display:inline-block; }
+  canvas { display:block; image-rendering:pixelated; }
+  h1 { font-size:15px; margin:0 0 8px; }
+  .row { margin:6px 0; }
+  button.key { width:44px; height:34px; margin:2px; font-size:14px; }
+  button.ser { width:180px; height:30px; margin:3px; }
+  .status { padding:6px; border-radius:3px; background:#333; min-height:1em; }
+  .on { color:#0f0; } .off { color:#f66; }
+  #logs { background:#111; color:#8f8; font-size:11px; padding:6px; height:180px; overflow:auto; white-space:pre; }
+  table { border-collapse:collapse; }
+  td { padding:0; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h1>CB-1 (Brother KH-970) emulator</h1>
+  <div id="lcdwrap"><canvas id="lcd" width="244" height="64"></canvas></div>
+
+  <div class="row">
+    <!-- PLACEHOLDER: serial interfaces (CSI=machine, UART=floppy) — not wired up yet -->
+    <button class="ser" id="btnCsi">WebSerial #1: machine (CSI)</button>
+    <button class="ser" id="btnUart">WebSerial #2: floppy (UART)</button>
+    <button class="ser" id="btnReset">Reset (keep SRAM)</button>
+    <button class="ser" id="btnDiag">Boot Diagnostic Menu</button>
+    <button class="ser" id="btnCancel">Cancel link wait</button>
+  </div>
+  <div class="row status" id="status">backend: disconnected</div>
+  <div class="row status" id="linkhealth">machine link: dead</div>
+
+  <div class="row" id="keys">
+    <table>
+      <tr><td><button class="key">ADVICE</button></td><td><button class="key">DC</button></td><td><button class="key">M/B</button></td><td><button class="key">OK</button></td></tr>
+      <tr><td><button class="key">UP</button></td><td><button class="key">DOWN</button></td><td><button class="key">LEFT</button></td><td><button class="key">RIGHT</button></td></tr>
+      <tr><td><button class="key">1</button></td><td><button class="key">2</button></td><td><button class="key">3</button></td><td><button class="key">C</button></td></tr>
+      <tr><td><button class="key">4</button></td><td><button class="key">5</button></td><td><button class="key">6</button></td><td><button class="key">.</button></td></tr>
+      <tr><td><button class="key">7</button></td><td><button class="key">8</button></td><td><button class="key">9</button></td><td><button class="key">0</button></td></tr>
+    </table>
+  </div>
+
+  <div class="row" id="logs"></div>
+</div>
+
+<script>
+// ============================================================ LCD canvas
+const lcd = document.getElementById('lcd');
+const ctx = lcd.getContext('2d');
+const W = 122, H = 32;                 // SED1520 x2 : 122 cols x 32 rows (4 pages)
+let fb = new Uint8Array(W * H);        // 0/1 framebuffer
+const img = ctx.createImageData(W, H); // reused ImageData (alpha pre-set)
+for (let i = 0; i < W * H; i++) img.data[i * 4 + 3] = 255;
+
+function drawLCD() {
+  for (let i = 0; i < W * H; i++) {
+    const v = fb[i] ? 255 : 0;
+    img.data[i * 4] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v;
+  }
+  // draw at native 122x64 then scale up with nearest-neighbour
+  const small = document.createElement('canvas');
+  small.width = W; small.height = H;
+  small.getContext('2d').putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(small, 0, 0, W, H, 0, 0, lcd.width, lcd.height);
+}
+
+// demo test pattern until the backend sends its first frame
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) fb[y * W + x] = (x ^ y) & 1;
+drawLCD();
+
+// ============================================================ backend link (HTTP polling)
+const status = document.getElementById('status');
+let connected = false;
+
+function setStatus(t, on) {
+  status.textContent = t;
+  status.className = 'row status ' + (on ? 'on' : 'off');
+}
+
+async function pollFrame() {
+  try {
+    const r = await fetch('/frame');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const m = await r.json();
+    const bin = atob(m.pixels);
+    for (let i = 0; i < W * H; i++) fb[i] = bin.charCodeAt(i);
+    drawLCD();
+    if (!connected) { connected = true; setStatus('backend: connected', true); }
+  } catch (e) {
+    if (connected) { connected = false; setStatus('backend: disconnected', false); }
+  }
+}
+setInterval(pollFrame, 50);
+pollFrame();
+
+// ============================================================ machine link health
+const linkHealth = document.getElementById('linkhealth');
+function setLink(active, txn) {
+  linkHealth.textContent = 'machine link: ' + (active ? 'ACTIVE' : 'dead') +
+    ' (txn=' + txn + ')';
+  linkHealth.className = 'row status ' + (active ? 'on' : 'off');
+}
+async function pollLink() {
+  try {
+    const r = await fetch('/csi_debug');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    setLink(!!d.link_active, d.txn_count);
+  } catch (e) {
+    setLink(false, 0);
+  }
+}
+setInterval(pollLink, 1000);
+pollLink();
+
+// ============================================================ keypad
+const keys = document.querySelectorAll('#keys button.key');
+for (const k of keys) {
+  k.addEventListener('pointerdown', () => pressKey(k.textContent, true));
+  k.addEventListener('pointerup',   () => pressKey(k.textContent, false));
+  k.addEventListener('pointerleave',() => pressKey(k.textContent, false));
+}
+async function pressKey(name, down) {
+  const url = '/key?k=' + encodeURIComponent(name) + (down ? '' : '&up=1');
+  try { await fetch(url, { method: 'POST' }); } catch (e) { log('key: ' + e); }
+}
+
+// ============================================================ boot options
+const btnDiag = document.getElementById('btnDiag');
+btnDiag.onclick = () => {
+  fetch('/diag', { method: 'POST' })
+    .then(() => log('boot diagnostic menu requested'))
+    .catch(e => log('diag: ' + e));
+};
+
+const btnReset = document.getElementById('btnReset');
+btnReset.onclick = () => {
+  fetch('/reset', { method: 'POST' })
+    .then(() => log('reset requested (SRAM preserved)'))
+    .catch(e => log('reset: ' + e));
+};
+
+const btnCancel = document.getElementById('btnCancel');
+btnCancel.onclick = () => {
+  fetch('/cancel_handshake', { method: 'POST' })
+    .then(() => log('boot handshake wait cancelled'))
+    .catch(e => log('cancel: ' + e));
+};
+
+// ============================================================ serial (WebSerial)
+// CSI = KH-970 machine link, UART = FB-100 floppy drive.
+//
+// Wire transport framing (must match emu/csi.py):
+//   AA | type | len | payload[len] | crc8(poly 0x07, init 0x00)
+//   type 0x01 = CSI byte (RP2040 -> emulator), 0x02 = CSI byte (emulator -> RP2040)
+function crc8(bytes) {
+  let c = 0;
+  for (const b of bytes) {
+    c ^= b;
+    for (let i = 0; i < 8; i++) {
+      c = (c & 0x80) ? (((c << 1) ^ 0x07) & 0xff) : ((c << 1) & 0xff);
+    }
+  }
+  return c;
+}
+function csiFrame(type, payload) {
+  const out = [0xaa, type, payload.length];
+  for (const b of payload) out.push(b);
+  out.push(crc8(out.slice(1)));
+  return new Uint8Array(out);
+}
+let csiBuf = [];
+function csiDeframe() {
+  const out = [];
+  for (;;) {
+    const i = csiBuf.indexOf(0xaa);
+    if (i < 0) { csiBuf = []; break; }
+    if (i > 0) csiBuf = csiBuf.slice(i);
+    if (csiBuf.length < 3) break;
+    const type = csiBuf[1], len = csiBuf[2], need = 4 + len;
+    if (csiBuf.length < need) break;
+    const fr = csiBuf.slice(0, need);
+    csiBuf = csiBuf.slice(need);
+    const payload = fr.slice(3, 3 + len);
+    if (crc8(fr.slice(1, 1 + 2 + len)) !== fr[need - 1]) continue; // bad crc
+    out.push({ type, payload });
+  }
+  return out;
+}
+async function csiReadLoop(reader) {
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (const b of value) csiBuf.push(b);
+      for (const f of csiDeframe()) {
+        if (f.type === 0x01) {                        // master -> emulator byte
+          await fetch('/csi_rx', { method: 'POST', body: new Uint8Array(f.payload) });
+        } else if (f.type === 0x05) {                 // bridge -> emulator pin change
+          await fetch('/csi_pin', { method: 'POST', body: new Uint8Array(f.payload) });
+        } else if (f.type === 0x03) {                 // bridge -> emulator event
+          fetch('/csi_event', { method: 'POST', body: new Uint8Array(f.payload) });
+          log('csi event: ' + f.payload.join(','));
+        }
+      }
+    }
+  } catch (e) { log('csi rx: ' + e); }
+}
+async function csiWriteLoop(writer) {
+  for (;;) {
+    try {
+      const r = await fetch('/csi_tx');
+      if (r.ok) {
+        const buf = await r.arrayBuffer();
+        if (buf.byteLength) await writer.write(new Uint8Array(buf));  // pre-framed T_REPLY / T_PIN records
+      }
+      const s = await fetch('/csi_state');
+      if (s.ok) {
+        const buf = await s.arrayBuffer();
+        if (buf.byteLength) await writer.write(new Uint8Array(buf));  // pre-framed T_STATE records
+      }
+    } catch (e) { /* backend not ready yet */ }
+    await new Promise(res => setTimeout(res, 2));
+  }
+}
+
+const btnCsi = document.getElementById('btnCsi');
+const btnUart = document.getElementById('btnUart');
+btnCsi.onclick = async () => {
+  try {
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    log('CSI: opened ' + (port.getInfo().usbVendorId ? 'USB device' : 'serial port'));
+    csiReadLoop(port.readable.getReader());
+    csiWriteLoop(port.writable.getWriter());
+    // Re-run the boot handshake now that the link is up, then power-cycle the
+    // machine so it asserts CS and the ROM sees it.
+    await fetch('/reset', { method: 'POST' });
+    log('CSI linked — power-cycle the KH-970 now (unplug/replug the link cable)');
+  } catch (e) { log('csi: ' + e); }
+};
+btnUart.onclick = () => log('placeholder: floppy (UART) serial not implemented yet');
+
+function log(s) {
+  const l = document.getElementById('logs');
+  l.textContent = s + '\n' + l.textContent;
+  if (l.textContent.length > 2000) l.textContent = l.textContent.slice(0, 2000);
+}
+</script>
+</body>
+</html>

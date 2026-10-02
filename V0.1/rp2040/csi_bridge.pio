@@ -1,0 +1,62 @@
+; CSI master for the KH-970 machine link (PIO).
+;
+; Pin mapping (configured in csi_bridge.c; the pins are NOT consecutive):
+;   JMP pin base = PIN_SCK (4):  `wait .. pin 0` -> SCK,  `wait .. pin 1` -> CS
+;   IN  pin base = PIN_DIN (7):   machine -> CB-1 data (master byte)
+;   OUT pin base = PIN_DOUT (8):  CB-1 -> machine data (reply byte)
+;   SET pin base = PIN_SCK (4):   `set pins` drives SCK (we are the master)
+;
+; The CB-1 is the CSI MASTER: it generates SCK.  The machine (slave) asserts
+; CS to request a byte and then shifts its data out in response to our clock.
+; The power-on "ack" is simply the FIRST rising edge of the first byte: the
+; machine raises DIN ~1.4 us after that edge and is then ready.
+;
+; Wire protocol (all CONFIRMED from the live Saleae capture of the real CB-1):
+;   CPOL=0 (SCK idle low).  One CS pulse per byte (8 clocks), CS active-low.
+;   MSB-first on the wire (handled by bit-reversing at the PIO FIFO boundary).
+;   Reply (DOUT): presented just before each SCK rising edge; the machine
+;     samples it on the rising edge.
+;   Master byte (DIN): the machine changes it ~4 us after each rising edge, so
+;     it is valid on the FALLING edge (we sample it there).  DIN is ACTIVE-LOW
+;     (inverted in csi_bridge.c).
+;
+; Timing (measured): SCK period ~113 us (~56 us high, ~58 us low).  The SM
+; clock is divided to 500 kHz (2 us per instruction) so the half-period delay
+; loops fit in the 5-bit immediate range.
+;
+; The reply byte is preloaded into OSR while CS is idle so bit 0 (MSB) is
+; stable before the first clock edge.
+
+.program csi_master
+    pull                          ; preload first reply byte (blocks until ready)
+
+.wrap_target
+    wait 0 pin 1                  ; wait for machine attention (CS low)
+
+    ; ~108 us after CS falls before the first clock (matches the CB-1's ack
+    ; latency; the machine just waits for us).
+    set x, 26
+idle1:
+    jmp x-- idle1
+    set x, 26
+idle2:
+    jmp x-- idle2
+
+    set x, 8                      ; 8 bits (JMP X-- is test-then-decrement)
+bitloop:
+    out pins, 1                   ; present reply bit k before the rising edge
+    set pins, 1                   ; SCK rising: machine samples reply bit k, then
+    set y, 26                     ;   presents master bit k
+dly_hi:
+    jmp y-- dly_hi
+    set pins, 0                   ; SCK falling: master bit k is valid
+    in pins, 1                    ; sample master bit k
+    set y, 24
+dly_lo:
+    jmp y-- dly_lo
+    jmp x-- bitloop
+
+    wait 1 pin 1                  ; wait CS deasserted (high)
+    push                          ; master byte -> RX FIFO
+    pull                          ; next reply byte -> OSR (blocks if CPU slow)
+.wrap

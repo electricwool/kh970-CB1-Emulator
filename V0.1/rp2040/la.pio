@@ -1,0 +1,12 @@
+; DIN logic analyzer — samples the machine's MISO (GPIO 7) at the PIO clock
+; and records a continuous window after the first DIN-low trigger.
+;
+;   jmp_pin = DIN (GPIO 7), in_base = DIN (GPIO 7)
+;   wait 0 pin 0   -> wait for DIN to go low (activity)
+;   in pins, 1     -> shift one DIN sample into ISR; autopush at 32 bits
+
+.program din_la
+    wait 0 pin 0        ; trigger: DIN low
+.wrap_target
+    in pins, 1          ; sample DIN bit
+.wrap
