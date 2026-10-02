@@ -6,7 +6,6 @@ GPIO assignments for `csi_bridge.c` (the `#define` names in parentheses).
 |-----------|--------|----------|------------------|-------------|
 | **GPIO 4** | `PIN_SCK`  | **SCK** — serial clock | input | CB-1 `P3.2` (machine drives the clock) |
 | **GPIO 5** | `PIN_CS`   | **CS** — chip-select / attention | input | CB-1 `P2.1` (active **low**, machine drives it) |
-| **GPIO 6** | `PIN_VCCA` | (not CSI) shifter low-side 3.3 V supply (VCCA) | output **high** | shifter `VCCA` |
 | **GPIO 7** | `PIN_DIN`  | **MISO** — machine → CB-1 data | input | CB-1 `P2.7` |
 | **GPIO 8** | `PIN_DOUT` | **MOSI** — CB-1 → machine data | output | CB-1 `P3.3` |
 
@@ -17,7 +16,6 @@ Pico                        KH-970 machine link
 ----                        -------------------
 GPIO 4  (SCK)   <---------- SCK   (clock, machine-driven)
 GPIO 5  (CS)    <---------- CS    (chip-select, active-low)
-GPIO 6  (VCCA)  ----------> level-converter VCCA (3.3 V rail, held HIGH)
 GPIO 7  (din)   <---------- MISO  (machine -> CB-1 data)
 GPIO 8  (dout)  ----------> MOSI  (CB-1 -> machine data)
 GND     -------------------- GND
@@ -59,11 +57,7 @@ level-converter VCCA rail (3.3 V, held high).
 
 ### Power
 
-The machine provides **+5 V on green** and **GND on bare**; use them for the
-level converter's high-side rail.  The converter's low-side rail (VCCA, 3.3 V)
-is powered from `GPIO 6` held high (the board draws well under 2 mA); the
-Pico's `3V3` pin is the alternative "proper" rail.  Ground must be common to
-the machine, the converter and the Pico.
+The machine is powered by 3.3V for the logic from the pico's regulator and 5V from the USB for the solenoids 
 
 ## PIO constraint — SCK and CS must be consecutive
 
@@ -84,17 +78,3 @@ Edit the `#define`s at the top of `csi_bridge.c`:
 #define PIN_DIN   7
 #define PIN_DOUT  8
 ```
-
-then rebuild:
-
-```powershell
-cd c:\esp32\cb1\rp2040
-cmake --build build
-```
-
-## Voltage
-
-The CB-1 is a 5 V part (78K/II); the RP2040 pins are **3.3 V only**. Verify
-the machine-link logic level before connecting directly — if it is 5 V, add a
-level shifter (or series protection on the inputs; the `dout` output must be
-boosted if the CB-1 needs 5 V thresholds).
